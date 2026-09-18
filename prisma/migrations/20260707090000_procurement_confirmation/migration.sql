@@ -1,0 +1,2 @@
+-- Generated while offline: file was empty; superseded by
+-- 20260707130000_procurement_confirmation_fix.

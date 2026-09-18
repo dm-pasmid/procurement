@@ -1,0 +1,568 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum Role {
+  INITIATOR
+  OC
+  ADM
+  DM
+  NDC
+  NEZARATH_CLERK
+  ADMIN
+}
+
+enum ReqStatus {
+  DRAFT
+  SUBMITTED
+  OC_APPROVED
+  ADM_APPROVED
+  APPROVED
+  RETURNED
+  REJECTED
+  IN_PROCUREMENT
+  SO_ISSUED
+  PARTIALLY_RECEIVED
+  RECEIVED
+  BILL_UNDER_PROCESS
+  CLOSED
+}
+
+enum FinalLevel {
+  ADM
+  DM
+}
+
+enum EstBasis {
+  LAST_PURCHASE_RATE
+  MARKET_SURVEY
+  GEM
+  RATE_CONTRACT
+  OTHER
+}
+
+enum ApprovalLevel {
+  OC
+  ADM
+  DM
+}
+
+enum ApprovalActionType {
+  APPROVE
+  RETURN
+  REJECT
+}
+
+enum ProcMode {
+  TENDER
+  EMPANELLED
+  GEM
+}
+
+enum SoStatus {
+  DRAFT
+  ISSUED
+  AMENDED
+  CANCELLED
+  CLOSED
+  SHORT_CLOSED
+}
+
+enum GrnStatus {
+  DRAFT
+  COUNTERSIGNED
+}
+
+enum BillStatus {
+  ENTERED
+  MEMO_GENERATED
+  PART_PAID
+  PAID
+}
+
+enum DeductionType {
+  SECURITY_DEPOSIT
+  LD_PENALTY
+  TDS_IT
+  TDS_GST
+  OTHER
+}
+
+enum FlagType {
+  SPLITTING_SUSPECT
+  PRICE_DEVIATION
+  QTY_ANOMALY
+  FREQUENCY_ANOMALY
+  DUPLICATE_SUSPECT
+  ESTIMATE_EXCEEDED
+  DELIVERY_OVERDUE
+  APPROVAL_SLA
+  GRN_NO_BILL
+  BILL_UNPAID
+}
+
+enum FlagSeverity {
+  INFO
+  WARN
+  CRITICAL
+}
+
+enum DocType {
+  REQ
+  SO
+  GRN
+  BPM
+}
+
+// ---------------------------------------------------------------------------
+// Organisation
+// ---------------------------------------------------------------------------
+
+model Section {
+  id     String  @id @default(cuid())
+  code   String  @unique
+  name   String
+  active Boolean @default(true)
+
+  profiles       Profile[]
+  requisitions   Requisition[]
+  deliveryOrders SupplyOrder[] @relation("SoDeliverySection")
+  admIncharges   AdmSection[]  @relation("SectionAdms")
+}
+
+/// ADM ↔ Section charge mapping: one ADM can be in charge of multiple
+/// sections. Maintained by ADMIN in Sections & Users. A section mapped to
+/// no ADM falls back to every ADM so cases never stall.
+model AdmSection {
+  id        String  @id @default(cuid())
+  admId     String  @db.Uuid
+  adm       Profile @relation("AdmSections", fields: [admId], references: [id])
+  sectionId String
+  section   Section @relation("SectionAdms", fields: [sectionId], references: [id])
+
+  @@unique([admId, sectionId])
+  @@index([sectionId])
+}
+
+/// id equals the Supabase auth.users id. One role per user.
+model Profile {
+  id          String  @id @db.Uuid
+  name        String
+  designation String
+  role        Role
+  sectionId   String
+  section     Section @relation(fields: [sectionId], references: [id])
+  active      Boolean @default(true)
+
+  requisitionsInitiated Requisition[]    @relation("ReqInitiator")
+  approvalActions       ApprovalAction[] @relation("ApprovalActor")
+  procurementsCreated   Procurement[]    @relation("ProcCreatedBy")
+  procurementsConfirmed Procurement[]    @relation("ProcConfirmedBy")
+  supplyOrdersIssued    SupplyOrder[]    @relation("SoIssuedBy")
+  grnsReceived          Grn[]            @relation("GrnReceiver")
+  grnsCountersigned     Grn[]            @relation("GrnOcCountersignedBy")
+  billsEntered          Bill[]           @relation("BillEnteredBy")
+  paymentsEntered       Payment[]        @relation("PaymentEnteredBy")
+  attachmentsUploaded   Attachment[]     @relation("AttachmentUploadedBy")
+  flagsAcknowledged     Flag[]           @relation("FlagAcknowledgedBy")
+  auditLogs             AuditLog[]       @relation("AuditActor")
+  admSections           AdmSection[]     @relation("AdmSections")
+  notificationReads     NotificationRead[] @relation("UserNotificationReads")
+
+  @@index([sectionId])
+}
+
+// ---------------------------------------------------------------------------
+// Masters
+// ---------------------------------------------------------------------------
+
+model Item {
+  id               String    @id @default(cuid())
+  name             String
+  category         String
+  unit             String
+  specTemplate     String?
+  lastPurchaseRate Decimal?  @db.Decimal(14, 2)
+  lastPurchaseDate DateTime?
+  avgRate12m       Decimal?  @db.Decimal(14, 2)
+  active           Boolean   @default(true)
+
+  requisitionItems RequisitionItem[]
+
+  @@unique([name, unit])
+}
+
+model Vendor {
+  id                   String    @id @default(cuid())
+  name                 String
+  gstin                String?
+  pan                  String?
+  bankAccountNo        String?
+  ifsc                 String?
+  address              String?
+  phone                String?
+  email                String?
+  empanelled           Boolean   @default(false)
+  empanelmentRef       String?
+  empanelmentValidTill DateTime?
+  active               Boolean   @default(true)
+
+  procurements Procurement[]
+  supplyOrders SupplyOrder[]
+}
+
+// ---------------------------------------------------------------------------
+// Requisition & approval
+// ---------------------------------------------------------------------------
+
+model Requisition {
+  id                  String     @id @default(cuid())
+  reqNumber           String     @unique
+  fy                  String
+  sectionId           String
+  section             Section    @relation(fields: [sectionId], references: [id])
+  initiatorId         String     @db.Uuid
+  initiator           Profile    @relation("ReqInitiator", fields: [initiatorId], references: [id])
+  purpose             String
+  status              ReqStatus  @default(DRAFT)
+  estimatedTotal      Decimal    @db.Decimal(14, 2)
+  sanctionedTotal     Decimal?   @db.Decimal(14, 2)
+  finalLevel          FinalLevel
+  routedToDmReason    String?
+  desiredDeliveryDays Int?
+  createdAt           DateTime   @default(now())
+  updatedAt           DateTime   @updatedAt
+
+  items           RequisitionItem[]
+  approvalActions ApprovalAction[]
+  procurement     Procurement?
+  supplyOrders    SupplyOrder[]
+
+  @@index([sectionId])
+  @@index([initiatorId])
+  @@index([status])
+  @@index([fy])
+}
+
+/// Either itemId or itemNameFree must be present (enforced by a CHECK constraint).
+model RequisitionItem {
+  id            String      @id @default(cuid())
+  requisitionId String
+  requisition   Requisition @relation(fields: [requisitionId], references: [id])
+  itemId        String?
+  item          Item?       @relation(fields: [itemId], references: [id])
+  itemNameFree  String?
+  specification String?
+  unit          String
+  qty           Decimal     @db.Decimal(12, 3)
+  estRate       Decimal     @db.Decimal(14, 2)
+  estBasis      EstBasis
+  basisRemarks  String?
+
+  supplyOrderItems SupplyOrderItem[]
+
+  @@index([requisitionId])
+  @@index([itemId])
+}
+
+/// Append-only (enforced by a Postgres trigger).
+model ApprovalAction {
+  id            String             @id @default(cuid())
+  requisitionId String
+  requisition   Requisition        @relation(fields: [requisitionId], references: [id])
+  level         ApprovalLevel
+  actorId       String             @db.Uuid
+  actor         Profile            @relation("ApprovalActor", fields: [actorId], references: [id])
+  action        ApprovalActionType
+  remarks       String?
+  createdAt     DateTime           @default(now())
+
+  @@index([requisitionId])
+  @@index([actorId])
+}
+
+// ---------------------------------------------------------------------------
+// Procurement & supply orders
+// ---------------------------------------------------------------------------
+
+model Procurement {
+  id             String      @id @default(cuid())
+  requisitionId  String      @unique
+  requisition    Requisition @relation(fields: [requisitionId], references: [id])
+  mode           ProcMode
+  nitNumber      String?
+  nitDate        DateTime?
+  bidsReceived   Int?
+  gemOrderRef    String?
+  vendorId       String
+  vendor         Vendor      @relation(fields: [vendorId], references: [id])
+  procuredAmount Decimal     @db.Decimal(14, 2)
+  remarks        String?
+  createdById    String      @db.Uuid
+  createdBy      Profile     @relation("ProcCreatedBy", fields: [createdById], references: [id])
+  createdAt      DateTime    @default(now())
+  /// Drafted (e.g. by Nezarath clerk) until an NDC confirms.
+  confirmedById  String?     @db.Uuid
+  confirmedBy    Profile?    @relation("ProcConfirmedBy", fields: [confirmedById], references: [id])
+  confirmedAt    DateTime?
+
+  supplyOrders SupplyOrder[]
+
+  @@index([vendorId])
+}
+
+model SupplyOrder {
+  id                String        @id @default(cuid())
+  soNumber          String        @unique
+  fy                String
+  requisitionId     String
+  requisition       Requisition   @relation(fields: [requisitionId], references: [id])
+  procurementId     String
+  procurement       Procurement   @relation(fields: [procurementId], references: [id])
+  vendorId          String
+  vendor            Vendor        @relation(fields: [vendorId], references: [id])
+  deliverySectionId String
+  deliverySection   Section       @relation("SoDeliverySection", fields: [deliverySectionId], references: [id])
+  deliveryDays      Int
+  terms             String
+  status            SoStatus      @default(DRAFT)
+  version           Int           @default(1)
+  parentSoId        String?
+  parentSo          SupplyOrder?  @relation("SoAmendments", fields: [parentSoId], references: [id])
+  amendments        SupplyOrder[] @relation("SoAmendments")
+  issuedById        String?       @db.Uuid
+  issuedBy          Profile?      @relation("SoIssuedBy", fields: [issuedById], references: [id])
+  issuedAt          DateTime?
+  shortCloseReason  String?
+
+  items SupplyOrderItem[]
+  grns  Grn[]
+  bills Bill[]
+
+  @@index([requisitionId])
+  @@index([procurementId])
+  @@index([vendorId])
+  @@index([status])
+  @@index([fy])
+}
+
+model SupplyOrderItem {
+  id          String           @id @default(cuid())
+  soId        String
+  so          SupplyOrder      @relation(fields: [soId], references: [id])
+  reqItemId   String?
+  reqItem     RequisitionItem? @relation(fields: [reqItemId], references: [id])
+  description String
+  unit        String
+  qty         Decimal          @db.Decimal(12, 3)
+  rate        Decimal          @db.Decimal(14, 2)
+  gstPercent  Decimal          @default(0) @db.Decimal(5, 2)
+
+  grnItems  GrnItem[]
+  billItems BillItem[]
+
+  @@index([soId])
+  @@index([reqItemId])
+}
+
+// ---------------------------------------------------------------------------
+// Receipt (GRN)
+// ---------------------------------------------------------------------------
+
+model Grn {
+  id                  String      @id @default(cuid())
+  grnNumber           String      @unique
+  soId                String
+  so                  SupplyOrder @relation(fields: [soId], references: [id])
+  receiptDate         DateTime
+  challanNumber       String
+  challanDate         DateTime
+  receiverId          String      @db.Uuid
+  receiver            Profile     @relation("GrnReceiver", fields: [receiverId], references: [id])
+  ocCountersignedById String?     @db.Uuid
+  ocCountersignedBy   Profile?    @relation("GrnOcCountersignedBy", fields: [ocCountersignedById], references: [id])
+  ocCountersignedAt   DateTime?
+  remarks             String?
+  status              GrnStatus   @default(DRAFT)
+
+  items GrnItem[]
+
+  @@index([soId])
+  @@index([receiverId])
+}
+
+model GrnItem {
+  id          String          @id @default(cuid())
+  grnId       String
+  grn         Grn             @relation(fields: [grnId], references: [id])
+  soItemId    String
+  soItem      SupplyOrderItem @relation(fields: [soItemId], references: [id])
+  qtyReceived Decimal         @db.Decimal(12, 3)
+  qtyAccepted Decimal         @db.Decimal(12, 3)
+  qtyRejected Decimal         @db.Decimal(12, 3)
+  remarks     String?
+
+  @@index([grnId])
+  @@index([soItemId])
+}
+
+// ---------------------------------------------------------------------------
+// Billing & payment
+// ---------------------------------------------------------------------------
+
+model Bill {
+  id               String      @id @default(cuid())
+  bpmNumber        String      @unique
+  soId             String
+  so               SupplyOrder @relation(fields: [soId], references: [id])
+  vendorBillNumber String
+  vendorBillDate   DateTime
+  claimedAmount    Decimal     @db.Decimal(14, 2)
+  computedPayable  Decimal     @db.Decimal(14, 2)
+  deductionsTotal  Decimal     @default(0) @db.Decimal(14, 2)
+  netPayable       Decimal     @db.Decimal(14, 2)
+  status           BillStatus  @default(ENTERED)
+  enteredById      String      @db.Uuid
+  enteredBy        Profile     @relation("BillEnteredBy", fields: [enteredById], references: [id])
+  createdAt        DateTime    @default(now())
+
+  items      BillItem[]
+  deductions BillDeduction[]
+  payments   Payment[]
+
+  @@index([soId])
+  @@index([status])
+}
+
+model BillItem {
+  id             String          @id @default(cuid())
+  billId         String
+  bill           Bill            @relation(fields: [billId], references: [id])
+  soItemId       String
+  soItem         SupplyOrderItem @relation(fields: [soItemId], references: [id])
+  billedQty      Decimal         @db.Decimal(12, 3)
+  billedRate     Decimal         @db.Decimal(14, 2)
+  payableQty     Decimal         @db.Decimal(12, 3)
+  payableRate    Decimal         @db.Decimal(14, 2)
+  /// { qtyCapped: bool, rateCapped: bool, notes }
+  lineDeviations Json            @db.JsonB
+
+  @@index([billId])
+  @@index([soItemId])
+}
+
+/// Manual entry only — the system never computes deduction amounts.
+model BillDeduction {
+  id      String        @id @default(cuid())
+  billId  String
+  bill    Bill          @relation(fields: [billId], references: [id])
+  type    DeductionType
+  amount  Decimal       @db.Decimal(14, 2)
+  remarks String?
+
+  @@index([billId])
+}
+
+model Payment {
+  id            String   @id @default(cuid())
+  billId        String
+  bill          Bill     @relation(fields: [billId], references: [id])
+  voucherNumber String
+  voucherDate   DateTime
+  amountPaid    Decimal  @db.Decimal(14, 2)
+  mode          String?
+  remarks       String?
+  enteredById   String   @db.Uuid
+  enteredBy     Profile  @relation("PaymentEnteredBy", fields: [enteredById], references: [id])
+  createdAt     DateTime @default(now())
+
+  @@index([billId])
+}
+
+// ---------------------------------------------------------------------------
+// Cross-cutting
+// ---------------------------------------------------------------------------
+
+model Attachment {
+  id           String   @id @default(cuid())
+  entityType   String
+  entityId     String
+  label        String
+  fileUrl      String
+  uploadedById String   @db.Uuid
+  uploadedBy   Profile  @relation("AttachmentUploadedBy", fields: [uploadedById], references: [id])
+  createdAt    DateTime @default(now())
+
+  @@index([entityType, entityId])
+}
+
+model Flag {
+  id                 String       @id @default(cuid())
+  entityType         String
+  entityId           String
+  flagType           FlagType
+  severity           FlagSeverity
+  details            Json         @db.JsonB
+  acknowledgedById   String?      @db.Uuid
+  acknowledgedBy     Profile?     @relation("FlagAcknowledgedBy", fields: [acknowledgedById], references: [id])
+  acknowledgedAt     DateTime?
+  acknowledgeRemarks String?
+  createdAt          DateTime     @default(now())
+
+  @@index([entityType, entityId])
+  @@index([flagType])
+}
+
+/// Append-only (enforced by a Postgres trigger; see migration).
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?  @db.Uuid
+  actor      Profile? @relation("AuditActor", fields: [actorId], references: [id])
+  entityType String
+  entityId   String
+  action     String
+  before     Json?    @db.JsonB
+  after      Json?    @db.JsonB
+  createdAt  DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([actorId])
+}
+
+model NumberSeries {
+  id         Int     @id @default(autoincrement())
+  fy         String
+  docType    DocType
+  lastSerial Int     @default(0)
+
+  @@unique([fy, docType])
+}
+
+model Setting {
+  key   String @id
+  value String
+}
+
+/// Per-user read markers for derived, role-relevant in-app notifications.
+/// Notifications themselves are computed live from workflow state; this table
+/// records only which the user has marked read (keyed by a stable notifKey).
+model NotificationRead {
+  id       String   @id @default(cuid())
+  userId   String   @db.Uuid
+  user     Profile  @relation("UserNotificationReads", fields: [userId], references: [id])
+  notifKey String
+  readAt   DateTime @default(now())
+
+  @@unique([userId, notifKey])
+  @@index([userId])
+}
