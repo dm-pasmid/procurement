@@ -97,4 +97,3 @@ prisma/
 ## Status
 
 Scaffold phase. Authentication, role model, database schema, and module workflows arrive in subsequent phases.
-# procurement
